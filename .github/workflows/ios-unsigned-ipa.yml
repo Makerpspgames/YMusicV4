@@ -1,1 +1,96 @@
+name: Build unsigned iOS IPA
 
+# Builds an UNSIGNED YMusic .ipa on GitHub's free macOS runner, for personal sideloading with
+# Sideloadly/AltStore (the user's own Apple ID signs it at install time). Run it from the Actions
+# tab -> "Build unsigned iOS IPA" -> Run workflow, then download the artifact when it finishes.
+
+on:
+  workflow_dispatch:
+
+env:
+  # Keep in sync with FFMPEG_BUILD_REF in release.yml.
+  FFMPEG_BUILD_REF: 4d2dc9ae0c73dc5f01733f18af070412013a6a93
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - name: Select Xcode 26
+        run: sudo xcode-select -s /Applications/Xcode_26.3.app/Contents/Developer
+
+      - name: Check out YMusicV4 (this repository)
+        uses: actions/checkout@v4
+        with:
+          path: YMusicV4
+
+      - name: Check out ffmpeg-build (pinned commit)
+        uses: actions/checkout@v4
+        with:
+          repository: ymusic-io/ffmpeg-build
+          ref: ${{ env.FFMPEG_BUILD_REF }}
+          submodules: recursive
+          path: ffmpeg-build
+
+      - name: Cache the ffmpeg iOS build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ffmpeg-build/out
+            ffmpeg-build/.deps-ios-arm64
+          key: ffmpeg-ios-${{ env.FFMPEG_BUILD_REF }}
+
+      - name: Build static libav for iOS
+        working-directory: ffmpeg-build
+        run: |
+          if [ -f out/ios-arm64/lib/libavcodec.a ]; then
+            echo "cached ffmpeg build found, skipping"
+          else
+            scripts/build-ios.sh iphoneos
+          fi
+
+      - name: Install the xcodeproj gem
+        run: sudo gem install xcodeproj
+
+      - name: Regenerate the Xcode project
+        working-directory: YMusicV4/iosApp
+        run: ruby gen_xcodeproj.rb
+
+      - name: Build the app (code signing disabled)
+        working-directory: YMusicV4
+        env:
+          JAVA_HOME: ${{ env.JAVA_HOME_17_arm64 }}
+        run: |
+          xcodebuild \
+            -project iosApp/iosApp.xcodeproj \
+            -scheme iosApp \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build/DerivedData \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            build
+
+      - name: Package the unsigned IPA
+        working-directory: YMusicV4
+        run: |
+          set -e
+          APP=$(find build/DerivedData/Build/Products/Release-iphoneos -maxdepth 1 -name '*.app' | head -1)
+          if [ -z "$APP" ]; then
+            echo "ERROR: no .app under Release-iphoneos"
+            find build/DerivedData -name '*.app' | head
+            exit 1
+          fi
+          mkdir -p build/Payload
+          cp -R "$APP" build/Payload/
+          (cd build && zip -qry YMusic-unsigned.ipa Payload)
+          ls -lh build/YMusic-unsigned.ipa
+
+      - name: Upload the IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: YMusic-unsigned-ipa
+          path: YMusicV4/build/YMusic-unsigned.ipa
+          retention-days: 14
