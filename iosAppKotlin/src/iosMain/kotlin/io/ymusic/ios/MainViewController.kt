@@ -71,6 +71,7 @@ import io.ymusic.ytmedia.cache.SqlDelightSegmentIndex
 import io.ymusic.ytmedia.cache.nativeSegmentDatabaseDriver
 import io.ymusic.ytmedia.proxy.LocalMediaProxy
 import kmpcommon.log.TeeLogger
+import kmpcommon.uri.filePath
 import kmpcommon.uri.fileUri
 import kmphttp.KmpHttpClient
 import kmphttp.RedirectOptions
@@ -370,7 +371,7 @@ private suspend fun buildIosGraph(container: UIView): AppGraph {
         mediaStore = mediaStore,
         downloads = downloadService,
         deleteFromDisk = { item ->
-            withContext(Dispatchers.IO) {
+            withContext(Dispatchers.Default) {
                 check(item.uri.scheme.contentEquals("file")) { "not a local file: ${item.uri}" }
                 // mustExist=false: an already-gone file still clears its library row.
                 FileSystem.SYSTEM.delete(item.uri.filePath().toPath(), mustExist = false)
