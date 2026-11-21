@@ -53,8 +53,11 @@ Signing is the only manual step — this environment can't enter your Apple ID; 
 
 ## Notes
 
-- `mediaStore` is null in the iOS graph for now (Library shows empty) — keeps the shell lean; the
-  media-store SQLDelight native driver can be wired later (it already compiles for `iosArm64`).
+- The iOS graph wires `mediaStore` (native SQLDelight driver) and the download service: offline
+  downloads are audio-only m4a (no ffmpeg on iOS, so MP3/video outputs stay hidden) and land in
+  `Documents/YMusic Downloads`, visible in the Files app (`UIFileSharingEnabled`). Finished
+  downloads register into the Library via the hand-built draft (no ffmpeg probe). Folder scanning
+  stays a no-op, so the Library is downloads-only for now.
 - Local video isn't hosted in the shared surface on iOS yet (AVFoundation renders via `AVPlayerLayer`
   in the player-lab spike); YouTube picture is MSE `copyFrame`. Audio (the music default) is fine.
 - Settings → Link devices uses the camera (`NSCameraUsageDescription`) to scan a desktop QR, then
