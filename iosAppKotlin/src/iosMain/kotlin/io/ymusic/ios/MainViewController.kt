@@ -14,6 +14,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.window.ComposeUIViewController
+import io.ymusic.download.DefaultDownloadStorage
+import io.ymusic.download.DownloadFolderAccessException
+import io.ymusic.download.DownloadService
+import io.ymusic.download.DownloadStore
+import io.ymusic.download.downloadDatabaseNativeDriver
 import io.ymusic.dynamicengine.DynamicEngineManager
 import io.ymusic.dynamicengine.EMBEDDED_ENGINE_JS_VERSION
 import io.ymusic.dynamicengine.EMBEDDED_PLAYER_JS_VERSION
@@ -27,6 +32,9 @@ import io.ymusic.imageloader.networkFetcher
 import io.ymusic.logstore.DbLogger
 import io.ymusic.logstore.LogStore
 import io.ymusic.logstore.nativeLogDatabaseDriver
+import io.ymusic.mediastore.BetterMediaStore
+import io.ymusic.mediastore.mediaStoreNativeDriver
+import io.ymusic.mediastore.model.BucketDraft
 import io.ymusic.mse.MseVideoSurface
 import io.ymusic.player.LocalPlayerContext
 import io.ymusic.player.PlayerEngines
@@ -45,9 +53,12 @@ import io.ymusic.ui.App
 import io.ymusic.ui.AppGraph
 import io.ymusic.ui.AppHttpClients
 import io.ymusic.ui.CatalogueScreen
+import io.ymusic.ui.YtEngineSabrSpecResolver
+import io.ymusic.ui.downloadLocationFolder
 import io.ymusic.ui.ensureAppLanguage
 import io.ymusic.ui.playhistory.PlayHistoryStore
 import io.ymusic.ui.playhistory.playHistoryNativeDriver
+import io.ymusic.ui.registerCompletedDownload
 import io.ymusic.ui.sponsorblock.SqliteSponsorBlockStore
 import io.ymusic.ui.sponsorblock.sponsorBlockNativeDriver
 import io.ymusic.ui.startupFailedMessage
@@ -60,6 +71,7 @@ import io.ymusic.ytmedia.cache.SqlDelightSegmentIndex
 import io.ymusic.ytmedia.cache.nativeSegmentDatabaseDriver
 import io.ymusic.ytmedia.proxy.LocalMediaProxy
 import kmpcommon.log.TeeLogger
+import kmpcommon.uri.fileUri
 import kmphttp.KmpHttpClient
 import kmphttp.RedirectOptions
 import kmphttp.create
@@ -69,6 +81,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonElement
 import okio.FileSystem
 import okio.Path.Companion.toPath
@@ -76,6 +89,7 @@ import platform.Foundation.NSApplicationSupportDirectory
 import platform.Foundation.NSBundle
 import platform.Foundation.NSCachesDirectory
 import platform.Foundation.NSDate
+import platform.Foundation.NSDocumentDirectory
 import platform.Foundation.NSSearchPathForDirectoriesInDomains
 import platform.Foundation.NSUserDomainMask
 import platform.Foundation.timeIntervalSince1970
@@ -303,12 +317,65 @@ private suspend fun buildIosGraph(container: UIView): AppGraph {
         ),
     )
 
+    // The local library + offline downloads. Audio-only on iOS: ffmpeg is null, so the UI hides
+    // MP3/video outputs and downloads stay raw m4a (the download module is built for this). The
+    // finished files land in Documents/YMusic Downloads, visible in the Files app
+    // (UIFileSharingEnabled in Info.plist), and register into the Library through onCompleted.
+    val mediaStore = BetterMediaStore.create(mediaStoreNativeDriver())
+    val downloadDir = (NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, true).first() as String)
+        .toPath()
+        .resolve("YMusic Downloads")
+    FileSystem.SYSTEM.createDirectories(downloadDir)
+    val downloadDirUri = fileUri(downloadDir.toString())
+    mediaStore.upsertBucket(BucketDraft(uri = downloadDirUri, name = "YMusic Downloads"))
+    if (settings.downloadLocationFolder() == null) {
+        settings.put(AppSettings.downloadLocation, downloadDirUri.toString())
+    }
+    val ytResolver = YtEngineSabrSpecResolver {
+        withContext(Dispatchers.Main) { player.prepareYoutubeEngine() }
+        msePlayer
+    }
+    val downloadService = DownloadService(
+        store = DownloadStore(downloadDatabaseNativeDriver(), rootLogger),
+        scope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
+        now = now,
+        resolver = ytResolver,
+        client = KmpHttpClient.create {
+            cookieJar = cookies
+            defaultRedirectOptions = RedirectOptions(followRedirects = false, followSslRedirects = false)
+        },
+        userAgent = YOUTUBE_USER_AGENT,
+        ffmpeg = null,
+        storage = DefaultDownloadStorage(FileSystem.SYSTEM, dataDir.resolve("download-work")),
+        mediaCache = playerCache, // read-only (see YtStreamDownloader): reuse cached playback bytes
+        segmentIndex = SqlDelightSegmentIndex(
+            nativeSegmentDatabaseDriver("download_segments.db"),
+            now = now,
+        ),
+        downloadFolder = {
+            settings.downloadLocationFolder()
+                ?: throw DownloadFolderAccessException("(none)", IllegalStateException("no download folder is set"))
+        },
+        // No ffmpeg probe on iOS: registerCompletedDownload falls back to the hand-built draft.
+        onCompleted = { task, result -> registerCompletedDownload(mediaStore, settings, null, task, result) },
+        logger = rootLogger,
+        playerResponse = ytResolver::playerResponse,
+    )
+
     val graph = AppGraph(
         engines = engines,
         player = player,
         logger = rootLogger,
         playerCache = playerCache,
-        mediaStore = null,
+        mediaStore = mediaStore,
+        downloads = downloadService,
+        deleteFromDisk = { item ->
+            withContext(Dispatchers.IO) {
+                check(item.uri.scheme.contentEquals("file")) { "not a local file: ${item.uri}" }
+                // mustExist=false: an already-gone file still clears its library row.
+                FileSystem.SYSTEM.delete(item.uri.filePath().toPath(), mustExist = false)
+            }
+        },
         playHistory = PlayHistoryStore(playHistoryNativeDriver()),
         sponsorBlockStore = SqliteSponsorBlockStore(sponsorBlockNativeDriver()),
         scanLibraryFolder = null,
