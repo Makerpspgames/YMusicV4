@@ -37,6 +37,12 @@
     </array>
     <key>UIBackgroundModes</key>
     <array><string>audio</string></array>
+    <!-- Finished downloads live in Documents/YMusic Downloads; these two keys expose them in the
+         Files app and to the system's document picker. -->
+    <key>UIFileSharingEnabled</key>
+    <true/>
+    <key>LSSupportsOpeningDocumentsInPlace</key>
+    <true/>
     <key>NSCameraUsageDescription</key>
     <string>YMusic uses the camera to scan a QR code shown on your computer so you can sign in on desktop.</string>
     <key>NSFaceIDUsageDescription</key>
